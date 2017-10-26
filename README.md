@@ -1,2 +1,0 @@
-# ajango
-ajango

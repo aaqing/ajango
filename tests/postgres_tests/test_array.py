@@ -2,10 +2,9 @@ import decimal
 import json
 import unittest
 import uuid
-from contextlib import suppress
 
 from django import forms
-from django.core import exceptions, serializers, validators
+from django.core import checks, exceptions, serializers, validators
 from django.core.exceptions import FieldError
 from django.core.management import call_command
 from django.db import IntegrityError, connection, models
@@ -20,11 +19,13 @@ from .models import (
     PostgreSQLModel, Tag,
 )
 
-with suppress(ImportError):
+try:
     from django.contrib.postgres.fields import ArrayField
     from django.contrib.postgres.forms import (
         SimpleArrayField, SplitArrayField, SplitArrayWidget,
     )
+except ImportError:
+    pass
 
 
 class TestSaveLoad(PostgreSQLTestCase):
@@ -422,6 +423,38 @@ class TestChecks(PostgreSQLTestCase):
         errors = model.check()
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].id, 'postgres.E002')
+
+    def test_invalid_default(self):
+        class MyModel(PostgreSQLModel):
+            field = ArrayField(models.IntegerField(), default=[])
+
+        model = MyModel()
+        self.assertEqual(model.check(), [
+            checks.Warning(
+                msg=(
+                    "ArrayField default should be a callable instead of an "
+                    "instance so that it's not shared between all field "
+                    "instances."
+                ),
+                hint='Use a callable instead, e.g., use `list` instead of `[]`.',
+                obj=MyModel._meta.get_field('field'),
+                id='postgres.E003',
+            )
+        ])
+
+    def test_valid_default(self):
+        class MyModel(PostgreSQLModel):
+            field = ArrayField(models.IntegerField(), default=list)
+
+        model = MyModel()
+        self.assertEqual(model.check(), [])
+
+    def test_valid_default_none(self):
+        class MyModel(PostgreSQLModel):
+            field = ArrayField(models.IntegerField(), default=None)
+
+        model = MyModel()
+        self.assertEqual(model.check(), [])
 
     def test_nested_field_checks(self):
         """

@@ -3,10 +3,8 @@
 import pickle
 import re
 import time
-import warnings
 
 from django.core.cache.backends.base import DEFAULT_TIMEOUT, BaseCache
-from django.utils.deprecation import RemovedInDjango21Warning
 from django.utils.functional import cached_property
 
 
@@ -134,11 +132,14 @@ class BaseMemcachedCache(BaseCache):
         return val
 
     def set_many(self, data, timeout=DEFAULT_TIMEOUT, version=None):
-        safe_data = {
-            self.make_key(key, version=version): value
-            for key, value in data.items()
-        }
-        self._cache.set_multi(safe_data, self.get_backend_timeout(timeout))
+        safe_data = {}
+        original_keys = {}
+        for key, value in data.items():
+            safe_key = self.make_key(key, version=version)
+            safe_data[safe_key] = value
+            original_keys[safe_key] = key
+        failed_keys = self._cache.set_multi(safe_data, self.get_backend_timeout(timeout))
+        return [original_keys[k] for k in failed_keys]
 
     def delete_many(self, keys, version=None):
         self._cache.delete_multi(self.make_key(key, version=version) for key in keys)
@@ -167,25 +168,6 @@ class PyLibMCCache(BaseMemcachedCache):
     def __init__(self, server, params):
         import pylibmc
         super().__init__(server, params, library=pylibmc, value_not_found_exception=pylibmc.NotFound)
-
-        # The contents of `OPTIONS` was formerly only used to set the behaviors
-        # attribute, but is now passed directly to the Client constructor. As such,
-        # any options that don't match a valid keyword argument are removed and set
-        # under the `behaviors` key instead, to maintain backwards compatibility.
-        legacy_behaviors = {}
-        for option in list(self._options):
-            if option not in ('behaviors', 'binary', 'username', 'password'):
-                warnings.warn(
-                    "Specifying pylibmc cache behaviors as a top-level property "
-                    "within `OPTIONS` is deprecated. Move `%s` into a dict named "
-                    "`behaviors` inside `OPTIONS` instead." % option,
-                    RemovedInDjango21Warning,
-                    stacklevel=2,
-                )
-                legacy_behaviors[option] = self._options.pop(option)
-
-        if legacy_behaviors:
-            self._options.setdefault('behaviors', {}).update(legacy_behaviors)
 
     @cached_property
     def _cache(self):

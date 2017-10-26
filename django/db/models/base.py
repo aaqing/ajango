@@ -1,6 +1,7 @@
 import copy
 import inspect
 import warnings
+from functools import partialmethod
 from itertools import chain
 
 from django.apps import apps
@@ -27,7 +28,6 @@ from django.db.models.signals import (
 )
 from django.db.models.utils import make_model_tuple
 from django.utils.encoding import force_text
-from django.utils.functional import curry
 from django.utils.text import capfirst, get_text_list
 from django.utils.translation import gettext_lazy as _
 from django.utils.version import get_version
@@ -44,33 +44,23 @@ class Deferred:
 DEFERRED = Deferred()
 
 
-def subclass_exception(name, parents, module, attached_to=None):
+def subclass_exception(name, bases, module, attached_to):
     """
     Create exception subclass. Used by ModelBase below.
 
-    If 'attached_to' is supplied, the exception will be created in a way that
-    allows it to be pickled, assuming the returned exception class will be added
-    as an attribute to the 'attached_to' class.
+    The exception is created in a way that allows it to be pickled, assuming
+    that the returned exception class will be added as an attribute to the
+    'attached_to' class.
     """
-    class_dict = {'__module__': module}
-    if attached_to is not None:
-        def __reduce__(self):
-            # Exceptions are special - they've got state that isn't
-            # in self.__dict__. We assume it is all in self.args.
-            return (unpickle_inner_exception, (attached_to, name), self.args)
-
-        def __setstate__(self, args):
-            self.args = args
-
-        class_dict['__reduce__'] = __reduce__
-        class_dict['__setstate__'] = __setstate__
-
-    return type(name, parents, class_dict)
+    return type(name, bases, {
+        '__module__': module,
+        '__qualname__': '%s.%s' % (attached_to.__qualname__, name),
+    })
 
 
 class ModelBase(type):
     """Metaclass for all models."""
-    def __new__(cls, name, bases, attrs):
+    def __new__(cls, name, bases, attrs, **kwargs):
         super_new = super().__new__
 
         # Also ensure initialization is only performed for subclasses of Model
@@ -85,7 +75,7 @@ class ModelBase(type):
         classcell = attrs.pop('__classcell__', None)
         if classcell is not None:
             new_attrs['__classcell__'] = classcell
-        new_class = super_new(cls, name, bases, new_attrs)
+        new_class = super_new(cls, name, bases, new_attrs, **kwargs)
         attr_meta = attrs.pop('Meta', None)
         abstract = getattr(attr_meta, 'abstract', False)
         if not attr_meta:
@@ -296,12 +286,6 @@ class ModelBase(type):
         # Copy indexes so that index names are unique when models extend an
         # abstract model.
         new_class._meta.indexes = [copy.deepcopy(idx) for idx in new_class._meta.indexes]
-        # Set the name of _meta.indexes. This can't be done in
-        # Options.contribute_to_class() because fields haven't been added to
-        # the model at that point.
-        for index in new_class._meta.indexes:
-            if not index.name:
-                index.set_name_with_model(new_class)
 
         if abstract:
             # Abstract base models can't be instantiated and don't appear in
@@ -328,8 +312,8 @@ class ModelBase(type):
         opts._prepare(cls)
 
         if opts.order_with_respect_to:
-            cls.get_next_in_order = curry(cls._get_next_or_previous_in_order, is_next=True)
-            cls.get_previous_in_order = curry(cls._get_next_or_previous_in_order, is_next=False)
+            cls.get_next_in_order = partialmethod(cls._get_next_or_previous_in_order, is_next=True)
+            cls.get_previous_in_order = partialmethod(cls._get_next_or_previous_in_order, is_next=False)
 
             # Defer creating accessors on the foreign class until it has been
             # created and registered. If remote_field is None, we're ordering
@@ -358,6 +342,13 @@ class ModelBase(type):
             manager = Manager()
             manager.auto_created = True
             cls.add_to_class('objects', manager)
+
+        # Set the name of _meta.indexes. This can't be done in
+        # Options.contribute_to_class() because fields haven't been added to
+        # the model at that point.
+        for index in cls._meta.indexes:
+            if not index.name:
+                index.set_name_with_model(cls)
 
         class_prepared.send(sender=cls)
 
@@ -626,6 +617,12 @@ class Model(metaclass=ModelBase):
                 related_val = None if rel_instance is None else getattr(rel_instance, field.target_field.attname)
                 if local_val != related_val or (local_val is None and related_val is None):
                     field.delete_cached_value(self)
+
+        # Clear cached relations.
+        for field in self._meta.related_objects:
+            if field.is_cached(self):
+                field.delete_cached_value(self)
+
         self._state.db = db_instance._state.db
 
     def serializable_value(self, field_name):
@@ -1670,7 +1667,7 @@ class Model(metaclass=ModelBase):
 
 # ORDERING METHODS #########################
 
-def method_set_order(ordered_obj, self, id_list, using=None):
+def method_set_order(self, ordered_obj, id_list, using=None):
     if using is None:
         using = DEFAULT_DB_ALIAS
     order_wrt = ordered_obj._meta.order_with_respect_to
@@ -1682,7 +1679,7 @@ def method_set_order(ordered_obj, self, id_list, using=None):
             ordered_obj.objects.filter(pk=j, **filter_args).update(_order=i)
 
 
-def method_get_order(ordered_obj, self):
+def method_get_order(self, ordered_obj):
     order_wrt = ordered_obj._meta.order_with_respect_to
     filter_args = order_wrt.get_forward_related_filter(self)
     pk_name = ordered_obj._meta.pk.name
@@ -1693,12 +1690,12 @@ def make_foreign_order_accessors(model, related_model):
     setattr(
         related_model,
         'get_%s_order' % model.__name__.lower(),
-        curry(method_get_order, model)
+        partialmethod(method_get_order, model)
     )
     setattr(
         related_model,
         'set_%s_order' % model.__name__.lower(),
-        curry(method_set_order, model)
+        partialmethod(method_set_order, model)
     )
 
 ########
@@ -1717,9 +1714,3 @@ def model_unpickle(model_id):
 
 
 model_unpickle.__safe_for_unpickle__ = True
-
-
-def unpickle_inner_exception(klass, exception_name):
-    # Get the exception class from the class it is attached to:
-    exception = getattr(klass, exception_name)
-    return exception.__new__(exception)

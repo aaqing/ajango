@@ -25,7 +25,7 @@ class Lookup:
             # a bilateral transformation on a nested QuerySet: that won't work.
             from django.db.models.sql.query import Query  # avoid circular import
             if isinstance(rhs, Query):
-                raise NotImplementedError("Bilateral transformations on nested querysets are not supported.")
+                raise NotImplementedError("Bilateral transformations on nested querysets are not implemented.")
         self.bilateral_transforms = bilateral_transforms
 
     def apply_bilateral_transforms(self, value):
@@ -114,6 +114,10 @@ class Lookup:
     @cached_property
     def contains_aggregate(self):
         return self.lhs.contains_aggregate or getattr(self.rhs, 'contains_aggregate', False)
+
+    @cached_property
+    def contains_over_clause(self):
+        return self.lhs.contains_over_clause or getattr(self.rhs, 'contains_over_clause', False)
 
     @property
     def is_summary(self):
@@ -240,6 +244,20 @@ class FieldGetDbPrepValueIterableMixin(FieldGetDbPrepValueMixin):
 @Field.register_lookup
 class Exact(FieldGetDbPrepValueMixin, BuiltinLookup):
     lookup_name = 'exact'
+
+    def process_rhs(self, compiler, connection):
+        from django.db.models.sql.query import Query
+        if isinstance(self.rhs, Query):
+            if self.rhs.has_limit_one():
+                # The subquery must select only the pk.
+                self.rhs.clear_select_clause()
+                self.rhs.add_fields(['pk'])
+            else:
+                raise ValueError(
+                    'The QuerySet value for an exact lookup must be limited to '
+                    'one result using slicing.'
+                )
+        return super().process_rhs(compiler, connection)
 
 
 @Field.register_lookup

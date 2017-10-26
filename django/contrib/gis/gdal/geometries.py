@@ -49,7 +49,7 @@ from django.contrib.gis.gdal.geomtype import OGRGeomType
 from django.contrib.gis.gdal.libgdal import GDAL_VERSION
 from django.contrib.gis.gdal.prototypes import geom as capi, srs as srs_api
 from django.contrib.gis.gdal.srs import CoordTransform, SpatialReference
-from django.contrib.gis.geometry.regex import hex_regex, json_regex, wkt_regex
+from django.contrib.gis.geometry import hex_regex, json_regex, wkt_regex
 from django.utils.encoding import force_bytes
 
 
@@ -190,10 +190,7 @@ class OGRGeometry(GDALBase):
 
     def __eq__(self, other):
         "Is this Geometry equal to the other?"
-        if isinstance(other, OGRGeometry):
-            return self.equals(other)
-        else:
-            return False
+        return isinstance(other, OGRGeometry) and self.equals(other)
 
     def __str__(self):
         "WKT is used for the string representation."
